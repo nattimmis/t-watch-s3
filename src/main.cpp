@@ -77,9 +77,13 @@ int currentFace = 0;
 const int TOTAL_FACES = 18;  // Added Radiation Detection
 uint32_t frame = 0;
 
-// Calibration: User at 30cm baseline
-#define CALIB_DISTANCE_CM 30
-float calibRSSI = -45;  // Will be learned
+// Calibration: Arm length from heart to wrist
+// Average arm length ~60cm (Winter 2009 Biomechanics)
+// Watch worn at wrist = ~60cm from heart center
+// Nearest entity = wearer at ~0.6m from heart
+#define ARM_LENGTH_CM 60       // Heart to wrist distance
+#define WEARER_OFFSET_M 0.6    // Wearer's phone is ~0.6m from watch (in pocket/hand)
+float calibRSSI = -45;         // Will be learned at calibration distance
 
 // ============= BIOMETRIC SIGNATURE (Scientific) =============
 // Based on Shaffer & Ginsberg 2017 HRV review, Porges 2011 Polyvagal Theory
@@ -424,6 +428,29 @@ void fbScanlines() {
     }
 }
 
+// Black Mirror shimmer effect for headings only (call after drawing text)
+void fbShimmer(int y, int h) {
+    int shimmerX = (frame * 8) % 280 - 20;
+    for (int row = y; row < y + h && row < 240; row++) {
+        for (int x = 0; x < 240; x++) {
+            int dist = abs(x - shimmerX);
+            if (dist < 30) {
+                uint16_t c = fb[row * 240 + x];
+                if (c != BLACK) {
+                    int boost = (30 - dist) / 6;
+                    uint16_t r = ((c >> 11) & 0x1F) + boost;
+                    uint16_t g = ((c >> 5) & 0x3F) + boost * 2;
+                    uint16_t b = (c & 0x1F) + boost;
+                    r = min((uint16_t)31, r);
+                    g = min((uint16_t)63, g);
+                    b = min((uint16_t)31, b);
+                    fb[row * 240 + x] = (r << 11) | (g << 5) | b;
+                }
+            }
+        }
+    }
+}
+
 // 8x8 font
 const uint8_t font8x8[][8] = {
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
@@ -510,6 +537,21 @@ void fbTextCenter(int y, const char* str, uint16_t color, int size) {
     int len = strlen(str);
     int x = (SCREEN_W - len * (8 * size + size)) / 2;
     fbText(x, y, str, color, size);
+}
+
+// High contrast bold text (with black outline for readability)
+void fbTextBold(int x, int y, const char* str, uint16_t color, int size) {
+    fbText(x - 1, y, str, BLACK, size);
+    fbText(x + 1, y, str, BLACK, size);
+    fbText(x, y - 1, str, BLACK, size);
+    fbText(x, y + 1, str, BLACK, size);
+    fbText(x, y, str, color, size);
+}
+
+void fbTextCenterBold(int y, const char* str, uint16_t color, int size) {
+    int len = strlen(str);
+    int x = (SCREEN_W - len * (8 * size + size)) / 2;
+    fbTextBold(x, y, str, color, size);
 }
 
 // ============= Display =============
@@ -952,43 +994,58 @@ void face_Clock() {
     fbClear(BLACK);
     if (millis() - lastRTCRead > 1000) { lastRTCRead = millis(); rtcRead(); }
 
-    // Subtle background rings
+    // Subtle background pulse rings
     for (int i = 0; i < 2; i++) {
         int r = 60 + ((frame + i * 40) % 60);
-        fbCircle(120, 85, r, GRID_DIM);
+        fbCircle(120, 75, r, GRID_DIM);
     }
 
     char buf[32];
-    // BIG TIME - one glance readable
-    sprintf(buf, "%02d:%02d", rtcHour, rtcMin);
-    fbTextCenter(35, buf, NEON_GREEN, 5);  // Size 5 = huge
 
-    // Date directly under time
+    // BIG TIME - shimmer effect on heading
+    sprintf(buf, "%02d:%02d", rtcHour, rtcMin);
+    fbTextCenterBold(25, buf, WHITE, 5);  // Size 5 = huge, white for max visibility
+    fbShimmer(25, 45);  // Shimmer on time only
+
+    // Date directly under time - clear readable
     const char* months[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
     sprintf(buf, "%02d %s 20%02d", rtcDay, months[rtcMonth-1], rtcYear);
-    fbTextCenter(95, buf, NEON_CYAN, 2);  // Size 2 = medium
+    fbTextCenterBold(85, buf, NEON_CYAN, 2);
 
     // Seconds with pulse
     sprintf(buf, ":%02d", rtcSec);
-    fbTextCenter(130, buf, (rtcSec % 2) ? NEON_PURPLE : DIM_CYAN, 2);
+    fbTextCenterBold(115, buf, (rtcSec % 2) ? NEON_PINK : NEON_PURPLE, 2);
 
-    // Status bar
-    fbLine(0, 160, 240, 160, NEON_CYAN);
+    // Status bar with glow
+    fbLine(0, 145, 240, 145, NEON_CYAN);
+    fbLine(0, 146, 240, 146, NEON_PURPLE);
 
-    // Big readable stats
+    // Big readable stats with bold outline
     sprintf(buf, "%d", heartRate);
-    fbText(15, 170, buf, NEON_RED, 3);
-    fbText(70, 180, "BPM", DIM_RED, 1);
+    fbTextBold(20, 155, buf, NEON_RED, 3);
+    fbTextBold(80, 175, "BPM", WHITE, 1);
 
-    sprintf(buf, "%d", entityCount);
-    fbText(130, 170, buf, NEON_GREEN, 3);
-    fbText(175, 180, "NEAR", DIM_GREEN, 1);
+    // Nearest = wearer at ~0.6m from heart (arm length calibration)
+    // Count excludes self (entities > WEARER_OFFSET_M)
+    int nearbyCount = 0;
+    for (int i = 0; i < entityCount; i++) {
+        if (entities[i].distanceM > WEARER_OFFSET_M) nearbyCount++;
+    }
+    sprintf(buf, "%d", nearbyCount);
+    fbTextBold(140, 155, buf, NEON_GREEN, 3);
+    fbTextBold(195, 175, "NEAR", WHITE, 1);
 
-    // Pair status
+    // Wearer indicator
+    fbTextBold(20, 200, "YOU", NEON_PINK, 1);
+    sprintf(buf, "%.1fM", WEARER_OFFSET_M);
+    fbTextBold(55, 200, buf, NEON_CYAN, 1);
+
+    // Pair status with label
     if (loraPaired) {
-        fbFillCircle(220, 220, 10, NEON_GREEN);
+        fbFillCircle(210, 210, 12, NEON_GREEN);
+        fbTextBold(185, 225, "LINKED", NEON_GREEN, 1);
     } else {
-        fbCircle(220, 220, 10, DIM_GREEN);
+        fbCircle(210, 210, 12, DIM_GREEN);
     }
     fbScanlines();
 }
@@ -1038,71 +1095,113 @@ void face_WalkieTalkie() {
 
 void face_Vitals() {
     fbClear(BLACK);
-    fbTextCenter(5, "VITALS", NEON_CYAN, 2);
 
+    // Heading with shimmer
+    fbTextCenterBold(3, "VITALS", NEON_CYAN, 2);
+    fbShimmer(3, 20);
+
+    // Animated heart
     float pulse = sin(frame * 0.15) * 0.2 + 1.0;
-    fbFillCircle(52, 55, 10 * pulse, NEON_RED);
-    fbFillCircle(68, 55, 10 * pulse, NEON_RED);
+    fbFillCircle(52, 50, 12 * pulse, NEON_RED);
+    fbFillCircle(70, 50, 12 * pulse, NEON_RED);
 
+    // Heart rate - BIG and readable
     heartRate = 68 + sin(frame * 0.1) * 4;
     char buf[32];
-    sprintf(buf, "%d BPM", heartRate);
-    fbText(25, 75, buf, NEON_RED, 2);
+    sprintf(buf, "%d", heartRate);
+    fbTextBold(25, 70, buf, WHITE, 4);  // Huge white number
+    fbTextBold(110, 85, "BPM", NEON_RED, 2);
 
+    // HRV with scientific reference
     hrv = 38 + sin(frame * 0.08) * 8;
-    sprintf(buf, "HRV %dMS", hrv);
-    fbText(130, 55, buf, NEON_GREEN, 1);
+    sprintf(buf, "HRV: %dMS", hrv);
+    fbTextBold(140, 50, buf, NEON_GREEN, 1);
+    fbTextBold(140, 62, "RMSSD", DIM_CYAN, 1);  // Scientific term
 
+    // ECG wave - thicker for visibility
     for (int x = 10; x < 230; x++) {
         int phase = (x + frame * 3) % 70;
-        int y = 115;
-        if (phase > 20 && phase < 25) y = 115 - (phase - 20) * 10;
-        else if (phase >= 25 && phase < 30) y = 65 + (phase - 25) * 14;
-        fbPixel(x, y, (x > 210) ? NEON_GREEN : DIM_GREEN);
+        int y = 120;
+        if (phase > 20 && phase < 25) y = 120 - (phase - 20) * 12;
+        else if (phase >= 25 && phase < 30) y = 60 + (phase - 25) * 16;
+        fbPixel(x, y, NEON_GREEN);
+        fbPixel(x, y + 1, NEON_GREEN);
     }
 
+    // Stress with bar
     stress = 30 + sin(frame * 0.05) * 15;
-    sprintf(buf, "STRESS %d%%", (int)stress);
-    fbText(10, 140, buf, stress < 50 ? NEON_GREEN : NEON_YELLOW, 1);
-    fbRect(10, 155, stress * 2, 10, stress < 50 ? NEON_GREEN : NEON_RED);
+    sprintf(buf, "STRESS: %d%%", (int)stress);
+    fbTextBold(10, 145, buf, WHITE, 2);
+    fbRect(10, 170, (int)(stress * 2.2), 12, stress < 50 ? NEON_GREEN : NEON_RED);
+    fbRect(10, 170, 220, 12, GRID_DIM);  // Outline
 
-    fbLine(0, 175, 240, 175, NEON_CYAN);
-    sprintf(buf, "%.1fM NEAREST", nearestEntityM < 50 ? nearestEntityM : 0);
-    fbText(10, 185, buf, NEON_GREEN, 2);
+    // Distance from heart (arm calibration)
+    fbLine(0, 190, 240, 190, NEON_PURPLE);
+    float nearestFromHeart = nearestEntityM < 50 ? nearestEntityM + (ARM_LENGTH_CM / 100.0) : 0;
+    sprintf(buf, "%.1fM FROM HEART", nearestFromHeart);
+    fbTextBold(10, 200, buf, NEON_CYAN, 2);
+
+    // Scientific note
+    fbText(10, 225, "REF: SHAFFER 2017", DIM_CYAN, 1);
     fbScanlines();
 }
 
 void face_Radar() {
     fbClear(BLACK);
-    fbTextCenter(5, droneCount > 0 ? "DRONE ALERT" : "RADAR", droneCount > 0 ? NEON_RED : NEON_CYAN, 2);
 
-    int cx = 120, cy = 115;
-    for (int r = 25; r <= 75; r += 25) fbCircle(cx, cy, r, GRID_DIM);
+    // Heading with shimmer
+    const char* title = droneCount > 0 ? "DRONE ALERT" : "RADAR";
+    uint16_t titleCol = droneCount > 0 ? NEON_RED : NEON_CYAN;
+    fbTextCenterBold(3, title, titleCol, 2);
+    fbShimmer(3, 20);
+
+    int cx = 120, cy = 110;
+
+    // Radar rings with labels
+    for (int r = 25; r <= 75; r += 25) {
+        fbCircle(cx, cy, r, GRID_DIM);
+    }
     fbLine(cx - 80, cy, cx + 80, cy, GRID_DIM);
     fbLine(cx, cy - 80, cx, cy + 80, GRID_DIM);
 
+    // Range labels
+    fbText(cx + 27, cy - 5, "5M", DIM_CYAN, 1);
+    fbText(cx + 52, cy - 5, "10M", DIM_CYAN, 1);
+    fbText(cx + 77, cy - 5, "15M", DIM_CYAN, 1);
+
+    // Sweep with trail
     float sweep = frame * 0.08;
     for (int i = 0; i < 15; i++) {
         float a = sweep - i * 0.04;
-        fbLine(cx, cy, cx + cos(a) * 75, cy + sin(a) * 75, (200 - i * 12) >> 3 << 6);
+        uint16_t col = (200 - i * 12) >> 3 << 6;
+        fbLine(cx, cy, cx + cos(a) * 75, cy + sin(a) * 75, col);
     }
 
+    // Entities with distance labels
     for (int i = 0; i < entityCount; i++) {
         if (millis() - entities[i].lastSeen > 30000) continue;
         int ex = entities[i].x, ey = entities[i].y;
         float p = sin(frame * 0.2 + i) * 2;
         if (entities[i].isDrone) {
-            fbFillCircle(ex, ey, 6 + p, NEON_RED);
-            fbLine(ex - 8, ey - 8, ex + 8, ey + 8, NEON_RED);
+            fbFillCircle(ex, ey, 7 + p, NEON_RED);
+            fbLine(ex - 10, ey - 10, ex + 10, ey + 10, NEON_RED);
         } else {
-            fbFillCircle(ex, ey, 4 + p, NEON_GREEN);
+            fbFillCircle(ex, ey, 5 + p, NEON_GREEN);
         }
     }
 
-    char buf[16];
+    // You in center
+    fbFillCircle(cx, cy, 6, NEON_PINK);
+    fbText(cx - 4, cy - 3, "U", BLACK, 1);
+
+    // Stats - big and clear
+    char buf[32];
     sprintf(buf, "%d", entityCount);
-    fbText(20, 205, buf, NEON_GREEN, 3);
-    fbText(65, 215, "ENTITIES", DIM_GREEN, 1);
+    fbTextBold(20, 200, buf, WHITE, 4);
+    fbTextBold(80, 215, "ENTITIES", NEON_GREEN, 1);
+
+    sprintf(buf, "%d DRONES", droneCount);
+    fbTextBold(140, 205, buf, droneCount > 0 ? NEON_RED : DIM_GREEN, 2);
     fbScanlines();
 }
 
@@ -1979,62 +2078,107 @@ void setup() {
 
     pinMode(BTN_1, INPUT_PULLUP);
 
-    // Animated Black Mirror winking smiley splash
-    for (int anim = 0; anim < 60; anim++) {  // 60 frames animation
+    // BLACK MIRROR laughing/winking smiley - exact style from the show
+    for (int anim = 0; anim < 80; anim++) {  // 80 frames animation
         fbClear(BLACK);
 
-        int smx = 120, smy = 55;
+        int smx = 120, smy = 60;
 
-        // Face outline with pulse
-        int faceR = 40 + sin(anim * 0.2) * 3;
-        fbCircle(smx, smy, faceR, NEON_CYAN);
-        fbCircle(smx, smy, faceR - 2, GRID_DIM);
+        // Black Mirror style - white face on black background
+        int faceR = 45 + sin(anim * 0.15) * 3;
 
-        // LEFT EYE - winks periodically
-        bool winking = (anim > 30 && anim < 45);
-        if (winking) {
-            // Winking - horizontal line
-            fbLine(smx - 18, smy - 8, smx - 6, smy - 8, NEON_GREEN);
-            fbLine(smx - 18, smy - 7, smx - 6, smy - 7, NEON_GREEN);
+        // Face circle - thick outline like Black Mirror
+        for (int r = faceR; r > faceR - 3; r--) {
+            fbCircle(smx, smy, r, WHITE);
+        }
+
+        // Wink cycle: frames 20-35 left wink, frames 50-65 right wink
+        bool leftWink = (anim > 20 && anim < 35);
+        bool rightWink = (anim > 50 && anim < 65);
+
+        // LEFT EYE - Black Mirror laughing style (curved ^_^)
+        if (leftWink) {
+            // Winking shut - curved line like ^
+            for (int i = -8; i <= 8; i++) {
+                int ey = smy - 12 + abs(i) / 2;
+                fbPixel(smx - 15 + i, ey, WHITE);
+                fbPixel(smx - 15 + i, ey + 1, WHITE);
+            }
         } else {
-            // Open eye
-            fbFillCircle(smx - 12, smy - 8, 5, NEON_GREEN);
-            fbFillCircle(smx - 12, smy - 8, 2, BLACK);  // Pupil
-        }
-
-        // RIGHT EYE - always open
-        fbFillCircle(smx + 12, smy - 8, 5, NEON_GREEN);
-        fbFillCircle(smx + 12, smy - 8, 2, BLACK);  // Pupil
-
-        // Creepy smile - curves up more during wink
-        int smileUp = winking ? 3 : 0;
-        for (int i = -18; i <= 18; i++) {
-            int sy = smy + 12 + abs(i) / 3 - smileUp;
-            fbPixel(smx + i, sy, NEON_GREEN);
-            fbPixel(smx + i, sy + 1, NEON_GREEN);
-        }
-
-        // Glitch scanlines
-        if (anim % 8 < 2) {
-            int gy = random(smy - 30, smy + 30);
-            for (int gx = smx - 35; gx < smx + 35; gx++) {
-                if (random(4) == 0) fbPixel(gx, gy, NEON_PURPLE);
+            // Open laughing eye - curved up ◠
+            for (int i = -7; i <= 7; i++) {
+                int ey = smy - 10 - (7 - abs(i)) / 2;
+                fbPixel(smx - 15 + i, ey, WHITE);
+                fbPixel(smx - 15 + i, ey + 1, WHITE);
             }
         }
 
-        // HYPERLOG BIOELECTRIC heading
-        fbTextCenter(110, "HYPERLOG", NEON_PURPLE, 2);
-        fbTextCenter(135, "BIOELECTRIC", NEON_CYAN, 2);
-        fbTextCenter(160, "NEURAL OCEAN", NEON_GREEN, 2);
-        fbTextCenter(190, "V14.0", NEON_ORANGE, 2);
+        // RIGHT EYE
+        if (rightWink) {
+            // Winking shut
+            for (int i = -8; i <= 8; i++) {
+                int ey = smy - 12 + abs(i) / 2;
+                fbPixel(smx + 15 + i, ey, WHITE);
+                fbPixel(smx + 15 + i, ey + 1, WHITE);
+            }
+        } else {
+            // Open laughing eye
+            for (int i = -7; i <= 7; i++) {
+                int ey = smy - 10 - (7 - abs(i)) / 2;
+                fbPixel(smx + 15 + i, ey, WHITE);
+                fbPixel(smx + 15 + i, ey + 1, WHITE);
+            }
+        }
 
-        // Animated text smiley
-        const char* smileys[] = {":)", ";)", ":)", ":)"};
-        fbTextCenter(215, smileys[(anim / 15) % 4], NEON_CYAN, 2);
+        // BIG LAUGHING SMILE - Black Mirror style ◡
+        for (int i = -22; i <= 22; i++) {
+            int curve = (22 - abs(i)) / 3;  // Deep curve = big smile
+            int my = smy + 15 + curve;
+            fbPixel(smx + i, my, WHITE);
+            fbPixel(smx + i, my + 1, WHITE);
+            fbPixel(smx + i, my + 2, WHITE);
+        }
+
+        // Teeth hint (Black Mirror has slight teeth)
+        if (anim % 20 < 15) {
+            fbLine(smx - 10, smy + 18, smx + 10, smy + 18, BLACK);
+        }
+
+        // Glitch effect - horizontal displacement
+        if (anim % 12 < 3) {
+            int gy = smy - 30 + random(60);
+            int shift = random(-15, 15);
+            for (int gx = smx - 40; gx < smx + 40; gx++) {
+                if (random(3) == 0) {
+                    uint16_t gc = (random(2) == 0) ? NEON_CYAN : NEON_PURPLE;
+                    fbPixel(gx + shift, gy, gc);
+                }
+            }
+        }
+
+        // Scanline flicker
+        if (anim % 6 < 2) {
+            int scanY = (anim * 5) % 50 + smy - 25;
+            fbLine(smx - 45, scanY, smx + 45, scanY, NEON_CYAN);
+        }
+
+        // HYPERLOG BIOELECTRIC heading
+        fbTextCenter(115, "HYPERLOG", NEON_PURPLE, 2);
+        fbTextCenter(140, "BIOELECTRIC", NEON_CYAN, 2);
+        fbTextCenter(165, "NEURAL OCEAN", NEON_GREEN, 2);
+        fbTextCenter(195, "V14.0", NEON_PINK, 2);
+
+        // Laughing/winking text smiley synced with face
+        const char* smileys[] = {":D", ";D", ":D", ";)"};
+        int sIdx = 0;
+        if (leftWink) sIdx = 1;
+        else if (rightWink) sIdx = 3;
+        else sIdx = (anim / 10) % 2 == 0 ? 0 : 2;
+        fbTextCenter(220, smileys[sIdx], WHITE, 2);
 
         fbScanlines();
         pushFramebuffer();
-        delay(50);  // 20 FPS animation
+        delay(42);  // ~24 FPS smooth
     }
 
     Serial.println("HYPERLOG BIOELECTRIC NEURAL OCEAN v14.0 Ready");
